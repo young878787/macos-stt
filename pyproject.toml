@@ -1,0 +1,50 @@
+[project]
+name = "macos-stt"
+version = "0.2.0"
+description = "macOS system speech recognition — zero config, fully offline, 63 languages"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.9"
+authors = [{ name = "bannana" }]
+keywords = [
+    "macos", "speech-to-text", "stt", "speech-recognition",
+    "offline", "apple-silicon", "sfspeechrecognizer", "whisper-alternative",
+    "zero-dependency", "voice", "transcription",
+]
+
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Multimedia :: Sound/Audio :: Speech",
+]
+
+dependencies = [
+    "pyobjc-framework-speech>=10.0",
+    "typer>=0.9",
+]
+
+[project.optional-dependencies]
+server = ["fastapi>=0.100", "uvicorn>=0.20", "python-multipart>=0.0.5"]
+dev = ["pytest>=7"]
+
+[project.scripts]
+macos-stt = "macos_stt.cli:app"
+
+[project.urls]
+Homepage = "https://github.com/bannana/macos-stt"
+Repository = "https://github.com/bannana/macos-stt"
+
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
