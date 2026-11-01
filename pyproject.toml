@@ -28,6 +28,8 @@ classifiers = [
 
 dependencies = [
     "pyobjc-framework-speech>=10.0",
+    "pyobjc-framework-libdispatch>=10.0",
+    "pyobjc-framework-AVFoundation>=10.0",
     "typer>=0.9",
 ]
 

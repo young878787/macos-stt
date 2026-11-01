@@ -1,7 +1,13 @@
 """macOS SFSpeechRecognizer 核心引擎。
 
-SFSpeechRecognizer 的回调必须由主线程 RunLoop 派发。
-用子线程 + CFRunLoop pump + threading.Event 同步，保证线程安全。
+SFSpeechRecognizer 的 recognition task 回调固定綁定在「主執行緒」的
+RunLoop 上，因此所有辨識邏輯必須在主執行緒執行、並持續 pump
+NSRunLoop 才能收到回调。
+
+（舊版把 recognizer 建在子執行緒、pump 子執行緒的 RunLoop，
+永遠收不到回调，導致 transcribe 一律超時，現已修正。）
+
+注意: 本模組的 transcribe_* 函式只能從主執行緒呼叫。
 """
 
 from __future__ import annotations
@@ -100,7 +106,22 @@ def list_languages() -> list[str]:
     return list(SUPPORTED_LANGUAGES)
 
 
-def transcribe_file(path: str, *, language: str | None = None, timeout: float = 15.0) -> RecognitionResult:
+def transcribe_file(
+    path: str,
+    *,
+    language: str | None = None,
+    timeout: float = 15.0,
+    on_device: bool = True,
+    contextual_strings: list[str] | None = None,
+) -> RecognitionResult:
+    """辨識音訊檔案。
+
+    Args:
+        on_device: True（預設）強制本機辨識；False 允許雲端（中英混合
+            語音辨識較穩，但需要網路）。
+        contextual_strings: 提示詞清單（如 ["VS Code", "Python"]），
+            提升專有名詞/術語的辨識命中率。
+    """
     _ensure_authorized()
     if _auth_cached != int(SFSpeechRecognizerAuthorizationStatusAuthorized):
         raise AuthorizationError(f"Speech recognition not authorized (status={_auth_cached})")
@@ -115,45 +136,42 @@ def transcribe_file(path: str, *, language: str | None = None, timeout: float = 
     if not os.path.exists(path):
         raise MacOSSpeechError(f"File not found: {path}")
 
+    # SFSpeechRecognizer 的回调只會在「主執行緒」觸發，
+    # 因此辨識與 RunLoop 都必須在主執行緒執行。
+    recognizer = SFSpeechRecognizer.alloc().initWithLocale_(locale)
+    if recognizer is None:
+        raise MacOSSpeechError("Failed to create SFSpeechRecognizer")
+
+    request = SFSpeechURLRecognitionRequest.alloc().initWithURL_(url)
+    request.setRequiresOnDeviceRecognition_(on_device)
+    if contextual_strings:
+        request.setContextualStrings_(list(contextual_strings))
+    request.setShouldReportPartialResults_(False)
+
     result_holder: list[RecognitionResult] = []
     error_holder: list[str] = []
     done = threading.Event()
 
-    def worker():
-        recognizer = SFSpeechRecognizer.alloc().initWithLocale_(locale)
-        if recognizer is None:
-            error_holder.append("Failed to create SFSpeechRecognizer")
+    def handler(result, error):
+        if error:
+            error_holder.append(str(error))
             done.set()
             return
+        if result is not None and result.isFinal():
+            text = result.bestTranscription().formattedString()
+            result_holder.append(RecognitionResult(text=text, confidence=1.0, language=lang))
+            done.set()
 
-        request = SFSpeechURLRecognitionRequest.alloc().initWithURL_(url)
-        request.setRequiresOnDeviceRecognition_(True)
-        request.setShouldReportPartialResults_(False)
+    task = recognizer.recognitionTaskWithRequest_resultHandler_(request, handler)
 
-        def handler(result, error):
-            if error:
-                error_holder.append(str(error))
-                done.set()
-                return
-            if result is not None and result.isFinal():
-                text = result.bestTranscription().formattedString()
-                result_holder.append(RecognitionResult(text=text, confidence=1.0, language=lang))
-                done.set()
-
-        recognizer.recognitionTaskWithRequest_resultHandler_(request, handler)
-
-        run_loop = Foundation.NSRunLoop.currentRunLoop()
-        deadline = time.time() + timeout
-        while time.time() < deadline and not done.is_set():
-            run_loop.runMode_beforeDate_(
-                Foundation.NSDefaultRunLoopMode,
-                Foundation.NSDate.dateWithTimeIntervalSinceNow_(0.1),
-            )
-
-    thread = threading.Thread(target=worker, daemon=True)
-    thread.start()
-    done.wait(timeout=timeout + 1.0)
-    thread.join(timeout=1.0)
+    run_loop = Foundation.NSRunLoop.currentRunLoop()
+    deadline = time.time() + timeout
+    while time.time() < deadline and not done.is_set():
+        run_loop.runMode_beforeDate_(
+            Foundation.NSDefaultRunLoopMode,
+            Foundation.NSDate.dateWithTimeIntervalSinceNow_(0.1),
+        )
+    task.cancel()
 
     if error_holder:
         raise RecognitionError(error_holder[0])
@@ -162,7 +180,15 @@ def transcribe_file(path: str, *, language: str | None = None, timeout: float = 
     return result_holder[0]
 
 
-def transcribe_bytes(data: bytes, sample_rate: int, *, language: str | None = None, timeout: float = 15.0) -> RecognitionResult:
+def transcribe_bytes(
+    data: bytes,
+    sample_rate: int,
+    *,
+    language: str | None = None,
+    timeout: float = 15.0,
+    on_device: bool = True,
+    contextual_strings: list[str] | None = None,
+) -> RecognitionResult:
     tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
     try:
         with wave.open(tmp, "wb") as wf:
@@ -171,7 +197,13 @@ def transcribe_bytes(data: bytes, sample_rate: int, *, language: str | None = No
             wf.setframerate(sample_rate)
             wf.writeframes(data)
         tmp.close()
-        return transcribe_file(tmp.name, language=language, timeout=timeout)
+        return transcribe_file(
+            tmp.name,
+            language=language,
+            timeout=timeout,
+            on_device=on_device,
+            contextual_strings=contextual_strings,
+        )
     finally:
         try:
             os.unlink(tmp.name)

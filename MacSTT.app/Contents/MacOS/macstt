@@ -1,0 +1,36 @@
+#!/Users/owo/projects/mac_ai_control/macos-stt/.venv/bin/python
+
+"""MacSTT app launcher — 由 start.py 自動建立並透過 open 啟動。"""
+import json
+import os
+import runpy
+import sys
+
+PROJECT = '/Users/owo/projects/mac_ai_control/macos-stt'
+with open("/tmp/macstt_pid", "w") as _f:
+    _f.write(str(os.getpid()))
+try:
+    a = json.load(open("/tmp/macstt_args.json"))
+except Exception:
+    a = {"lang": "zh-TW", "pause": 1.5, "device": None}
+
+sys.argv = [
+    "live_zh.py",
+    "--lang", str(a.get("lang", "zh-TW")),
+    "--pause", str(a.get("pause", 1.5)),
+    "--log", "/tmp/macstt_live.log",
+]
+if a.get("device") is not None:
+    sys.argv += ["--device", str(a["device"])]
+if a.get("no_hints"):
+    sys.argv += ["--no-hints"]
+else:
+    sys.argv += ["--hints", str(a.get("hints") or "")]
+if a.get("cloud"):
+    sys.argv += ["--cloud"]
+if a.get("no_engine"):
+    sys.argv += ["--no-engine"]
+
+os.chdir(PROJECT)
+sys.path.insert(0, os.path.join(PROJECT, "src"))
+runpy.run_path(os.path.join(PROJECT, "live_zh.py"), run_name="__main__")

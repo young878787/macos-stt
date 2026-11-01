@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleName</key>
+	<string>MacSTT</string>
+	<key>CFBundleDisplayName</key>
+	<string>MacSTT 即時轉譯</string>
+	<key>CFBundleIdentifier</key>
+	<string>local.birc.macstt</string>
+	<key>CFBundleVersion</key>
+	<string>1.0</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.0</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleExecutable</key>
+	<string>macstt</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>本程式使用系統內建語音辨識將您的語音轉為文字，處理全程在本機完成，不會上傳。</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>本程式需要麥克風訊號以進行即時語音轉文字。</string>
+</dict>
+</plist>
