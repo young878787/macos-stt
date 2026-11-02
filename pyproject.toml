@@ -34,8 +34,13 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-server = ["fastapi>=0.100", "uvicorn>=0.20", "python-multipart>=0.0.5"]
-dev = ["pytest>=7"]
+server = ["fastapi>=0.100", "uvicorn>=0.20", "python-multipart>=0.0.5", "websockets>=12"]
+dev = ["pytest>=7", "httpx>=0.24", "websockets>=12"]
+
+[tool.pytest.ini_options]
+markers = [
+    "live: 需要 macOS 語音辨識授權與真實引擎（預設 skip，跑法: uv run pytest -m live）",
+]
 
 [project.scripts]
 macos-stt = "macos_stt.cli:app"
@@ -43,6 +48,9 @@ macos-stt = "macos_stt.cli:app"
 [project.urls]
 Homepage = "https://github.com/bannana/macos-stt"
 Repository = "https://github.com/bannana/macos-stt"
+
+[tool.setuptools.package-data]
+macos_stt = ["vocab.default.txt"]
 
 [build-system]
 requires = ["setuptools>=64"]
