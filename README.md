@@ -63,12 +63,22 @@ macos-stt serve --port 8765
 ### HTTP Server
 
 ```bash
-macos-stt serve
-# POST /transcribe     — file upload
-# POST /transcribe/raw — base64 PCM bytes
+macos-stt serve --lang zh-TW --max-sessions 3
+# REST:
+# POST /transcribe     — file upload (multipart, 可附 hints)
+# POST /transcribe/raw — base64 PCM bytes (16kHz int16 mono)
+# GET  /vocabulary     — 詞庫查詢；POST 熱更新 (replace/merge/load)
+# GET  /sessions       — 並發 session 統計
 # GET  /languages      — 63 languages
-# GET  /health         — health check
+# GET  /health         — 健康檢查 (含授權狀態)
+# 串流 (WebSocket):
+# WS   /stream         — PCM 推上來，即時收 partial/utterance/final
+#
+# 建議用 .app bundle 啟動（首次可彈語音授權窗）:
+# python start.py serve
 ```
+
+完整 API 與 WS 協定文件：[docs/fastapi-server-plan.md](docs/fastapi-server-plan.md)
 
 ## Performance
 
