@@ -12,7 +12,36 @@ with open("/tmp/macstt_pid", "w") as _f:
 try:
     a = json.load(open("/tmp/macstt_args.json"))
 except Exception:
-    a = {"lang": "zh-TW", "pause": 1.5, "device": None}
+    a = {"lang": "zh-TW", "pause": 1.5, "device": None, "mode": "live"}
+
+os.chdir(PROJECT)
+sys.path.insert(0, os.path.join(PROJECT, "src"))
+
+if a.get("mode") == "serve":
+    # open .app 啟動的 stdout 不會到終端 → uvicorn 輸出導向 log 檔
+    # （start.py 會 tail 這個檔顯示「Application startup complete.」等訊息）
+    _log = open("/tmp/macstt_server.log", "w", buffering=1)
+    sys.stdout = _log
+    sys.stderr = _log
+    from macos_stt import engine as _engine
+    try:
+        # 首次授權在 main thread + 空閒 RunLoop 上完成（TCC 對話框需要）；
+        # 之後 uvicorn 佔住 main thread，請求路徑只需讀快取的授權狀態
+        _engine._ensure_authorized()
+    except Exception as _e:
+        print("授權檢查失敗: " + repr(_e), flush=True)
+    import uvicorn
+    from macos_stt.server import create_app
+    from macos_stt.vocab import VocabularyStore
+    store = VocabularyStore.load_file(a["vocab"]) if a.get("vocab") else VocabularyStore.load_default()
+    app = create_app(
+        default_lang=a.get("lang", "zh-TW"),
+        vocab=store,
+        max_sessions=int(a.get("max_sessions", 3)),
+        allow_cloud=bool(a.get("allow_cloud", False)),
+    )
+    uvicorn.run(app, host="127.0.0.1", port=int(a.get("port", 8765)), log_level="info")
+    sys.exit(0)
 
 sys.argv = [
     "live_zh.py",
@@ -31,6 +60,4 @@ if a.get("cloud"):
 if a.get("no_engine"):
     sys.argv += ["--no-engine"]
 
-os.chdir(PROJECT)
-sys.path.insert(0, os.path.join(PROJECT, "src"))
 runpy.run_path(os.path.join(PROJECT, "live_zh.py"), run_name="__main__")
