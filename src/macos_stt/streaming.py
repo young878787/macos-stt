@@ -1,4 +1,14 @@
-"""Streaming speech recognition via SFSpeechAudioBufferRecognitionRequest."""
+"""Streaming speech recognition via SFSpeechAudioBufferRecognitionRequest.
+
+兩種執行緒派發模式（``use_engine_thread``）：
+
+- False（預設，live_zh.py 本地麥克風模式）：ObjC 操作派發到主執行緒
+  （主執行緒直接執行 / main dispatch queue），主執行緒需持續 pump NSRunLoop。
+- True（uvicorn 伺服器環境）：主執行緒被 asyncio event loop 佔住，舊法
+  dispatch_sync 到 main queue 會死鎖；改把 ObjC 操作序列化到常駐的
+  EngineThread 執行。callback 仍由主執行緒 RunLoop 遞交（server.py 的
+  _pump_main_runloop 定期 pump），等待端用 event.wait 即可。
+"""
 
 from __future__ import annotations
 
@@ -37,17 +47,34 @@ def _on_main_thread() -> bool:
     return bool(Foundation.NSThread.isMainThread())
 
 
-def _main_sync(block):
-    """在 main 執行緒的執行脈絡同步執行 block。
+def _dispatch(use_engine: bool, on_main: bool, block) -> None:
+    """把 ObjC 操作 block 同步派發到固定的執行緒上執行。
 
-    pyobjc 的 dispatch 模組只提供 C API（沒有 ObjC 風格 DispatchQueue）。
-    注意：dispatch_sync 從主執行緒呼叫 main queue 會死鎖，
-    因此若已在主執行緒就直接執行，否則 sync 過去。
+    SFSpeechRecognizer 的 recognizer/task 建立與後續操作需發生在同一個
+    執行緒上（callback 實測由主執行緒 RunLoop 遞交）：
+
+    - use_engine=False（本地模式，現行行為）：on_main 時直接執行，
+      否則 dispatch_sync 到 main dispatch queue。
+    - use_engine=True（伺服器模式）：block 排到 EngineThread 上依序執行
+      （ObjC 操作序列化）；callback 由主執行緒遞交，不經 engine thread。
+
+    ⚠ 警告：use_engine=True 時絕不能在 engine thread（"macstt-engine"）
+    本身上呼叫本函式 —— run().result() 會等自己在 queue 上執行的工作，
+    造成自己等自己的死鎖。呼叫端（uvicorn worker thread、主執行緒）沒問題。
+
+    on_main 由呼叫端偵測後傳入，讓本函式保持純邏輯、可在測試中以
+    fake 值驗證三種分派路徑。
     """
-    import dispatch
-    if _on_main_thread():
+    if use_engine:
+        from .engine_thread import EngineThread
+        EngineThread.shared().run(block, timeout=30.0).result(timeout=35.0)
+        return
+    if on_main:
+        # 已在 callback 所綁定的主執行緒：直接執行
+        # （從 main thread dispatch_sync 到 main queue 會死鎖）。
         block()
     else:
+        import dispatch
         dispatch.dispatch_sync(dispatch.dispatch_get_main_queue(), block)
 
 
@@ -63,6 +90,7 @@ class StreamingRecognizer:
         contextual_strings: list[str] | None = None,
         detect_multiple_utterances: bool = False,
         on_utterance: Callable[[str], None] | None = None,
+        use_engine_thread: bool = False,
     ):
         """建立串流辨識器。
 
@@ -77,6 +105,12 @@ class StreamingRecognizer:
             on_utterance: 引擎自斷句回呼（仅在 detect_multiple_utterances
                 開啟時有意義）。注意: 開多句模式下 finish() 回傳的
                 final 只覆蓋最後一句，之前每句以 on_utterance 送出。
+            use_engine_thread: False（預設）ObjC 操作派發到主執行緒
+                （本地麥克風模式，live_zh.py 用法）；True 派發到
+                EngineThread（uvicorn 伺服器模式：主執行緒被 event loop
+                佔住不 pump RunLoop，舊法 dispatch_sync 到 main queue
+                會死鎖）。True 時不可從 engine thread 本身呼叫本類別的
+                公開方法（會自己等自己死鎖）。
         """
         _ensure_authorized()
         if int(SFSpeechRecognizer.authorizationStatus()) != int(SFSpeechRecognizerAuthorizationStatusAuthorized):
@@ -90,6 +124,7 @@ class StreamingRecognizer:
         self._contextual_strings = list(contextual_strings) if contextual_strings else None
         self._detect_multiple = detect_multiple_utterances
         self._on_utterance = on_utterance
+        self._use_engine = use_engine_thread
 
         locale = Foundation.NSLocale.alloc().initWithLocaleIdentifier_(language)
         self._recognizer = SFSpeechRecognizer.alloc().initWithLocale_(locale)
@@ -155,7 +190,9 @@ class StreamingRecognizer:
         def _start():
             self._task = self._recognizer.recognitionTaskWithRequest_resultHandler_(self._request, handler)
 
-        _main_sync(_start)
+        # 派發目標依模式而定：主執行緒（本地）或 engine thread（伺服器）；
+        # task 建在哪個執行緒，callback 就綁在哪個執行緒的 RunLoop。
+        _dispatch(self._use_engine, _on_main_thread(), _start)
 
         self._feed_thread = threading.Thread(target=self._feed_loop, daemon=True)
         self._feed_thread.start()
@@ -195,7 +232,8 @@ class StreamingRecognizer:
             ctypes.memmove(ctypes.addressof(target), data, len(data))
             self._request.appendAudioPCMBuffer_(buf)
 
-        _main_sync(_do_append)
+        # 音訊餵入必須與 task 在同一個執行緒（callback 綁定的那個）。
+        _dispatch(self._use_engine, _on_main_thread(), _do_append)
 
     def feed(self, chunk: bytes | memoryview):
         if not self._started:
@@ -216,11 +254,17 @@ class StreamingRecognizer:
         def _end():
             if self._request:
                 self._request.endAudio()
-        _main_sync(_end)
+        _dispatch(self._use_engine, _on_main_thread(), _end)
 
-        # 最終結果的 callback 綁在主執行緒: 若在執行主執行緒就要 pump
-        # NSRunLoop 才能收到；在子執行緒則直接 wait 即可。
-        if _on_main_thread():
+        # 最終結果的 callback 由主執行緒 RunLoop 遞交：
+        # - engine 模式: server 的 _pump_main_runloop 負責 pump，
+        #   等待端一律 event.wait() 即可，不需要（也不能）pump main RunLoop。
+        # - 本地模式: callback 綁主執行緒，呼叫端在主執行緒時要 pump
+        #   NSRunLoop 才能收到；在子執行緒則直接 wait。
+        if self._use_engine:
+            if not self._done.wait(timeout=timeout):
+                pass
+        elif _on_main_thread():
             import Foundation
             rl = Foundation.NSRunLoop.currentRunLoop()
             deadline = time.time() + timeout
