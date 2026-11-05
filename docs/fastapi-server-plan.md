@@ -124,14 +124,19 @@ uvicorn 的 event loop 在 main thread 但不 pump CFRunLoop，因此：
      "on_device":true,          # false 需伺服器以 --allow-cloud 啟動
      "multi_utterance":true,    # 引擎自斷句（預設 true）
      "vad_flush_seconds":3.0,   # 安全網：靜音 N 秒 flush 尾句
-     "max_session_seconds":300} # session 上限，到點自動重開
+     "max_session_seconds":300, # session 上限，到點自動重開
+     "flush_pre_delay_seconds":0.4} # 可選。收尾時 endAudio 前等引擎處理句尾音訊的秒數（預設 0.4）
   binary frame: raw int16 mono 16kHz PCM（建議 200ms ≈ 6.4KB/幀，上限 256KB/幀）
+  text  frame: {"type":"flush"}   # 客戶端自己判斷這句說完了：立刻收尾（final 立即出）並重開。
+                                  # 與音訊幀同一條序列處理，一定排在先前的幀之後；這句還沒有語音／文字時不做事
   text  frame: {"type":"close"}
 
 伺服器 → 客戶端
   {"type":"partial",  "text":"…"}                      # 引擎 partial
   {"type":"utterance","text":"第一句"}                 # 引擎自斷句
-  {"type":"final",    "text":"…", "confidence":1.0}    # session 收尾
+  {"type":"final",    "text":"…", "confidence":1.0,    # session 收尾
+   "timing":{"reason":"client_flush|server_vad|max_session|replay",  # 收尾原因
+             "pre_delay_ms":100, "finish_ms":55}}     # endAudio 前等了多久／endAudio 到 final 花多久（舊 client 可忽略）
   {"type":"session_restarted"}                        # 自動重開（透明）
   {"type":"error",    "code":"…", "message":"…"}       # 致命錯誤後 close(1011)
 ```
