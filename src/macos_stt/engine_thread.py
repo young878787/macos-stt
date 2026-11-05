@@ -118,6 +118,8 @@ class EngineThread:
         timer = threading.Timer(timeout, _expire)
         timer.daemon = True
         timer.start()
+        # 工作完成就收掉看門狗：音訊幀每個都走這裡，不取消的話每幀留一條 30 s 的 Timer 執行緒
+        fut.add_done_callback(lambda _f: timer.cancel())
         return fut
 
     def register(self, job: EngineJob) -> None:

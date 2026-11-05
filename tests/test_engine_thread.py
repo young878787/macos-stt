@@ -111,3 +111,14 @@ def test_idle_does_not_spin():
     cpu0 = time.process_time()
     time.sleep(1.0)
     assert time.process_time() - cpu0 < 0.3
+
+
+def test_finished_jobs_do_not_leave_watchdog_threads():
+    """每個音訊幀都走 run()；完成後看門狗 Timer 必須被取消，否則每幀留一條 30 s 的執行緒"""
+    et = EngineThread.shared()
+    et.run(lambda: None).result(timeout=5)  # 先讓 engine thread 起來
+    before = threading.active_count()
+    for _ in range(100):
+        et.run(lambda: None).result(timeout=5)
+    time.sleep(0.2)
+    assert threading.active_count() - before < 10
