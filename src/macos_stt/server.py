@@ -38,7 +38,7 @@ from .engine import (
     transcribe_file_engine,
 )
 from .engine_thread import EngineThread
-from .session import SessionConfig, SessionLimitExceeded, SessionManager
+from .session import FLUSH_PRE_DELAY, SessionConfig, SessionLimitExceeded, SessionManager
 from .vocab import VocabularyStore
 
 _NO_SPEECH_RE = re.compile(r"no[_ ]?speech|1110", re.I)
@@ -325,7 +325,9 @@ def create_app(
         """一 connection = 一 session（佔 max_sessions 名額）。
 
         協定 v1：首則 text frame 為 config；之後 binary frame = int16 mono
-        16kHz PCM（建議 200ms≈6400 samples）；text {"type":"close"} 收尾。
+        16kHz PCM（建議 200ms≈6400 samples）；text {"type":"flush"} 要求立刻
+        收尾這一句（client 自己判斷說完了，final 帶 timing）；text {"type":"close"} 收尾。
+        config 可選 flush_pre_delay_seconds（斷句後 endAudio 前的等待，預設 0.4）。
         伺服器回 text JSON：partial / utterance / final / session_restarted /
         error。
         """
@@ -364,6 +366,7 @@ def create_app(
                 multi_utterance=bool(cfg.get("multi_utterance", True)),
                 vad_flush_seconds=float(cfg.get("vad_flush_seconds", 3.0)),
                 max_session_seconds=float(cfg.get("max_session_seconds", 300.0)),
+                flush_pre_delay=float(cfg.get("flush_pre_delay_seconds", FLUSH_PRE_DELAY)),
                 hints=list(cfg.get("hints") or []),
             )
 
@@ -399,6 +402,9 @@ def create_app(
                             continue
                         if t == "close":
                             return
+                        if t == "flush":
+                            # 與音訊幀同一條序列處理：flush 一定在先前的幀都餵進去之後才執行
+                            await asyncio.to_thread(session.flush)
 
             async def pump() -> None:
                 while True:

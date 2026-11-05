@@ -337,3 +337,20 @@ def test_transcribe_busy_when_stream_holds_engine():
         assert r.headers.get("retry-after") == "2"
         mgr.release(s)
         assert mgr._rest_busy is False
+
+
+def test_ws_flush_message_returns_final_with_timing(ws_base_url):
+    with wsclient.connect(ws_base_url + "/stream") as c:
+        _send_config(c, lang="zh-TW", flush_pre_delay_seconds=0.05)
+        frame = b"\x00\x20" * 6400
+        for _ in range(6):
+            c.send(frame)
+        assert json.loads(c.recv(timeout=10))["type"] == "partial"
+        c.send(json.dumps({"type": "flush"}))
+        events = []
+        while not any(e["type"] == "final" for e in events):
+            events.append(json.loads(c.recv(timeout=10)))
+        final = next(e for e in events if e["type"] == "final")
+        assert final["text"] == "mock-partial" and final["timing"]["reason"] == "client_flush"
+        assert final["timing"]["pre_delay_ms"] < 200
+        c.send(json.dumps({"type": "close"}))

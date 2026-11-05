@@ -111,6 +111,7 @@ class SessionConfig:
     multi_utterance: bool = True        # 引擎自斷句（detect_multiple_utterances）
     vad_flush_seconds: float = 3.0      # 安全網：靜音 N 秒仍無新句 → flush 尾句重開
     max_session_seconds: float = 300.0  # 單一 session 最長秒數（到點自動重開）
+    flush_pre_delay: float = FLUSH_PRE_DELAY  # 斷句後、endAudio 前等引擎處理句尾音訊的秒數
     hints: list[str] = field(default_factory=list)
 
 
@@ -166,6 +167,7 @@ class Session:
         self._last_speech = 0.0
         self._rec = None
         self._final_via_on_final = False
+        self._timing: dict | None = None  # 收尾中的計時：{reason, pre_delay_ms, t_end}，final 事件附上 timing
         self._session_start = 0.0
         self._closed = False
 
@@ -208,6 +210,17 @@ class Session:
                 return
         rec.feed(data)
 
+    def flush(self) -> None:
+        """client 判斷這句說完了：立刻收尾（final 立即出）並重開。必須從「非 engine thread」、
+        且與 feed() 同一條序列呼叫（WS 的 feed 迴圈依序處理，flush 一定排在先前的音訊幀之後）。
+        沒在識別（等待者）、或這一句還沒有任何語音／文字時什麼都不做。"""
+        if self._closed:
+            return
+        rec = self._rec
+        if rec is None or not (self._session_had_speech or (rec._last_partial or "").strip()):
+            return
+        self._flush_tail("client_flush")
+
     # ---- 引擎單槽：槽生涯 ----
 
     def _become_active(self) -> None:
@@ -237,7 +250,7 @@ class Session:
                         time.sleep(0.01)
             # 重放的音含語音 → 直接收尾結算（final 立即出，不等新靜音期）
             if snapshot and self._session_had_speech and not self._closed:
-                self._flush_tail()
+                self._flush_tail("replay")
 
     def _become_waiting(self) -> None:
         """讓出 engine 槽（flush 已把當前 recognizer 收尾完成）。"""
@@ -289,7 +302,7 @@ class Session:
             # 引擎 final callback；標記已送，避免 _finish_session 再送一次
             # 重複 final
             self._final_via_on_final = True
-            self._emit({"type": "final", "text": r.text, "confidence": r.confidence})
+            self._emit({"type": "final", "text": r.text, "confidence": r.confidence, **self._timing_field()})
 
         callbacks = dict(
             on_partial=lambda t: self._emit({"type": "partial", "text": t}),
@@ -341,17 +354,17 @@ class Session:
             and not self._pending_flush
             and (rec._last_partial or "").strip()
         ):
-            self._flush_tail()
+            self._flush_tail("server_vad")
         # 保險：session 超過上限就收掉重開
         elif (now - self._session_start) > self._config.max_session_seconds:
-            self._flush_tail()
+            self._flush_tail("max_session")
 
-    def _flush_tail(self):
+    def _flush_tail(self, reason: str = "server_vad"):
         if self._pending_flush or self._closed:
             return
         self._pending_flush = True
         try:
-            if self._finish_session():
+            if self._finish_session(reason):
                 rotated = False
                 m = self._manager
                 if m is not None:
@@ -368,7 +381,15 @@ class Session:
         finally:
             self._pending_flush = False
 
-    def _finish_session(self) -> bool:
+    def _timing_field(self) -> dict:
+        """final 事件的 timing 欄位：收尾原因、endAudio 前等了多久、endAudio 到 final 花多久（引擎辨識）"""
+        t = self._timing
+        if t is None:
+            return {}
+        return {"timing": {"reason": t["reason"], "pre_delay_ms": t["pre_delay_ms"],
+                           "finish_ms": round((time.monotonic() - t["t_end"]) * 1000, 1)}}
+
+    def _finish_session(self, reason: str = "server_vad") -> bool:
         """結束當前 recognizer session，final 有文字則發 final 事件。
         回傳是否真的有 session 被結束。"""
         rec = self._rec
@@ -376,7 +397,10 @@ class Session:
         if rec is None:
             return False
         # 尾部處理：靜音確認後等引擎處理完句尾音訊再 endAudio
-        time.sleep(FLUSH_PRE_DELAY)
+        t0 = time.monotonic()
+        time.sleep(self._config.flush_pre_delay)
+        t_end = time.monotonic()
+        self._timing = {"reason": reason, "pre_delay_ms": round((t_end - t0) * 1000, 1), "t_end": t_end}
         try:
             r = rec.finish(timeout=FINISH_TIMEOUT)
         except MacOSSpeechError:
@@ -384,8 +408,13 @@ class Session:
         # on_final 已送過（同一結果）就不重複送
         if not self._final_via_on_final and r and (r.text or "").strip():
             self._emit(
-                {"type": "final", "text": r.text, "confidence": r.confidence}
+                {"type": "final", "text": r.text, "confidence": r.confidence, **self._timing_field()}
             )
+        t = self._timing
+        self._timing = None
+        print(f"[flush] reason={reason} pre_delay_ms={t['pre_delay_ms']} "
+              f"finish_ms={round((time.monotonic() - t['t_end']) * 1000, 1)} "
+              f"text_len={len((r.text or '').strip()) if r else 0}", flush=True)
         return True
 
 

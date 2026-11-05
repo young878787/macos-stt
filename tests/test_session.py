@@ -252,3 +252,63 @@ def test_rest_engine_lease_excludes_streaming():
     mgr.release(s)
     assert mgr.try_acquire_engine() is True
     mgr.release_engine()
+
+
+def _talk(s, frames=6):
+    for _ in range(frames):
+        s.feed(pcm16(8000))
+    assert s._rec._last_partial == "mock-partial"  # 6 幀 × 12800B 已超過 32000B
+
+
+def test_flush_emits_final_with_timing_and_restarts():
+    events: list[dict] = []
+    s = Session(SessionConfig(flush_pre_delay=0.05), on_event=events.append, recognizer_factory=MockRecognizer)
+    _talk(s)
+    s.flush()
+
+    finals = [e for e in events if e["type"] == "final"]
+    assert len(finals) == 1 and finals[0]["text"] == "mock-partial"
+    t = finals[0]["timing"]
+    assert t["reason"] == "client_flush"
+    assert 40 <= t["pre_delay_ms"] < 150 and t["finish_ms"] >= 0
+    assert "session_restarted" in [e["type"] for e in events]
+    assert len(MockRecognizer.created) == 2  # flush 後重開，之後還能繼續 feed
+    s.feed(pcm16(8000))
+    assert MockRecognizer.created[-1].feed_count == 1
+    s.close()
+
+
+def test_flush_without_speech_or_text_does_nothing():
+    events: list[dict] = []
+    s = Session(SessionConfig(flush_pre_delay=0.05), on_event=events.append, recognizer_factory=MockRecognizer)
+    s.feed(pcm16(0))
+    s.flush()
+    assert events == [] and len(MockRecognizer.created) == 1
+    s.close()
+    s.flush()  # 關閉後不拋錯
+
+
+def test_flush_pre_delay_defaults_to_legacy_value_and_is_configurable():
+    assert SessionConfig().flush_pre_delay == 0.4
+    events: list[dict] = []
+    s = Session(SessionConfig(flush_pre_delay=0.0), on_event=events.append, recognizer_factory=MockRecognizer)
+    _talk(s)
+    s.flush()
+    assert [e for e in events if e["type"] == "final"][0]["timing"]["pre_delay_ms"] < 30
+    s.close()
+
+
+def test_server_vad_flush_final_reports_its_reason(monkeypatch):
+    monkeypatch.setattr(session_mod, "SILENCE_PAUSE", 0.1)
+    events: list[dict] = []
+    s = Session(SessionConfig(vad_flush_seconds=0.3, flush_pre_delay=0.05), on_event=events.append,
+                recognizer_factory=MockRecognizer)
+    for i in range(12):
+        s.feed(pcm16(8000 if i % 2 == 0 else 10))
+        time.sleep(0.05)
+    for _ in range(24):
+        s.feed(pcm16(0))
+        time.sleep(0.05)
+    finals = [e for e in events if e["type"] == "final"]
+    assert finals and finals[0]["timing"]["reason"] == "server_vad"
+    s.close()
